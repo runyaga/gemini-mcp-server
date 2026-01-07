@@ -16,7 +16,15 @@ from pydantic_ai.providers.google import GoogleProvider
 
 from gemini_mcp_server.client import execute_code
 from gemini_mcp_server.deps import GeminiDeps
-from gemini_mcp_server.models import AskGeminiInput, ListModelsInput, RunCodeInput
+from gemini_mcp_server.models import (
+    AskGeminiInput,
+    GetResearchInput,
+    ListModelsInput,
+    ListResearchInput,
+    RunCodeInput,
+    StartResearchInput,
+)
+from gemini_mcp_server.research import ResearchManager
 
 load_dotenv()
 
@@ -26,6 +34,18 @@ server = Server("gemini-mcp")
 # Configuration
 API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 DEFAULT_MODEL = "gemini-2.0-flash"
+RESEARCH_DB_PATH = os.environ.get("GEMINI_RESEARCH_DB", "research.db")
+
+# Singleton research manager (lazy initialized)
+_research_manager: ResearchManager | None = None
+
+
+def get_research_manager() -> ResearchManager:
+    """Get or create the research manager singleton."""
+    global _research_manager
+    if _research_manager is None:
+        _research_manager = ResearchManager(db_path=RESEARCH_DB_PATH)
+    return _research_manager
 
 
 # --- Agent Factory ---
@@ -83,6 +103,24 @@ async def list_tools() -> list[Tool]:
             "Supports numpy, pandas, and standard library. No pip install.",
             inputSchema=RunCodeInput.model_json_schema(),
         ),
+        Tool(
+            name="start_research",
+            description="Start a background deep research job using Gemini with Google Search grounding. "
+            "Returns immediately with a job_id. Use get_research to check status and retrieve results.",
+            inputSchema=StartResearchInput.model_json_schema(),
+        ),
+        Tool(
+            name="get_research",
+            description="Get the status and result of a research job. "
+            "Returns job state, and if completed, the research summary and sources.",
+            inputSchema=GetResearchInput.model_json_schema(),
+        ),
+        Tool(
+            name="list_research",
+            description="List research jobs, optionally filtered by state. "
+            "Returns jobs ordered by creation time (newest first).",
+            inputSchema=ListResearchInput.model_json_schema(),
+        ),
     ]
 
 
@@ -133,6 +171,80 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
         return [TextContent(type="text", text=response)]
 
+    if name == "start_research":
+        research_input = StartResearchInput.model_validate(arguments)
+        manager = get_research_manager()
+        job = await manager.start(
+            topic=research_input.topic, depth=research_input.depth
+        )
+        response = (
+            f"Research job started.\n\n"
+            f"Job ID: {job.id}\n"
+            f"Topic: {job.topic}\n"
+            f"Depth: {job.depth.value}\n"
+            f"State: {job.state.value}\n\n"
+            f"Use get_research with job_id='{job.id}' to check status and retrieve results."
+        )
+        return [TextContent(type="text", text=response)]
+
+    if name == "get_research":
+        get_input = GetResearchInput.model_validate(arguments)
+        manager = get_research_manager()
+        status = await manager.get_status(get_input.job_id)
+
+        if status is None:
+            return [TextContent(type="text", text=f"Job not found: {get_input.job_id}")]
+
+        response_lines = [
+            f"Job ID: {status.job.id}",
+            f"Topic: {status.job.topic}",
+            f"Depth: {status.job.depth.value}",
+            f"State: {status.job.state.value}",
+            f"Created: {status.job.created_at.isoformat()}",
+        ]
+
+        if status.job.started_at:
+            response_lines.append(f"Started: {status.job.started_at.isoformat()}")
+        if status.job.completed_at:
+            response_lines.append(f"Completed: {status.job.completed_at.isoformat()}")
+
+        if status.result:
+            response_lines.append("")
+            response_lines.append("--- Research Summary ---")
+            response_lines.append(status.result.summary)
+            if status.result.sources:
+                response_lines.append("")
+                response_lines.append("--- Sources ---")
+                for source in status.result.sources:
+                    response_lines.append(f"- {source}")
+
+        if status.error:
+            response_lines.append("")
+            response_lines.append(f"Error: {status.error}")
+
+        return [TextContent(type="text", text="\n".join(response_lines))]
+
+    if name == "list_research":
+        list_input = ListResearchInput.model_validate(arguments)
+        manager = get_research_manager()
+        jobs = await manager.list_jobs(state=list_input.state, limit=list_input.limit)
+
+        if not jobs:
+            filter_msg = (
+                f" with state '{list_input.state.value}'" if list_input.state else ""
+            )
+            return [
+                TextContent(type="text", text=f"No research jobs found{filter_msg}.")
+            ]
+
+        response_lines = [f"Found {len(jobs)} job(s):", ""]
+        for job in jobs:
+            response_lines.append(
+                f"- {job.id[:8]}... | {job.state.value:10} | {job.topic[:50]}"
+            )
+
+        return [TextContent(type="text", text="\n".join(response_lines))]
+
     raise ValueError(f"Unknown tool: {name}")
 
 
@@ -155,11 +267,16 @@ def main() -> None:
 __all__ = [
     "AskGeminiInput",
     "GeminiDeps",
+    "GetResearchInput",
     "ListModelsInput",
+    "ListResearchInput",
+    "ResearchManager",
     "RunCodeInput",
+    "StartResearchInput",
     "call_tool",
     "create_agent",
     "execute_code",
+    "get_research_manager",
     "list_tools",
     "main",
     "server",

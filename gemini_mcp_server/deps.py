@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from google import genai
 
 if TYPE_CHECKING:
-    from gemini_mcp_server.jobs import ResearchJobManager
+    pass
 
 
 @dataclass
@@ -26,7 +26,6 @@ class GeminiDeps:
     client: genai.Client
     default_model: str = "gemini-2.0-flash"
     max_retries: int = 3
-    job_manager: ResearchJobManager | None = field(default=None)
 
     @classmethod
     def from_env(cls) -> GeminiDeps:

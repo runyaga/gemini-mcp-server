@@ -58,11 +58,14 @@ class TestListTools:
 
             tools = await list_tools()
 
-            assert len(tools) == 3
+            assert len(tools) == 6
             tool_names = [t.name for t in tools]
             assert "ask_gemini" in tool_names
             assert "list_gemini_models" in tool_names
             assert "run_code" in tool_names
+            assert "start_research" in tool_names
+            assert "get_research" in tool_names
+            assert "list_research" in tool_names
 
             ask_gemini = next(t for t in tools if t.name == "ask_gemini")
             assert "prompt" in ask_gemini.inputSchema["properties"]
@@ -71,6 +74,10 @@ class TestListTools:
             run_code = next(t for t in tools if t.name == "run_code")
             assert "code" in run_code.inputSchema["properties"]
             assert "context" in run_code.inputSchema["properties"]
+
+            start_research = next(t for t in tools if t.name == "start_research")
+            assert "topic" in start_research.inputSchema["properties"]
+            assert "depth" in start_research.inputSchema["properties"]
 
 
 class TestCallTool:

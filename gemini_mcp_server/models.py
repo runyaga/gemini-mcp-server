@@ -1,6 +1,100 @@
 """Pydantic models for Gemini MCP Server."""
 
+from __future__ import annotations
+
+from datetime import datetime
+from enum import Enum
+
 from pydantic import BaseModel, Field
+
+# --- Research Enums ---
+
+
+class ResearchState(str, Enum):
+    """State of a research job."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class ResearchDepth(str, Enum):
+    """How thorough the research should be."""
+
+    QUICK = "quick"
+    STANDARD = "standard"
+    THOROUGH = "thorough"
+
+
+# --- Research Models ---
+
+
+class ResearchJob(BaseModel):
+    """A background research job."""
+
+    id: str = Field(description="Unique job identifier")
+    topic: str = Field(description="Research topic")
+    depth: ResearchDepth = Field(default=ResearchDepth.STANDARD)
+    state: ResearchState = Field(default=ResearchState.PENDING)
+    created_at: datetime = Field(default_factory=datetime.now)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+    @property
+    def is_complete(self) -> bool:
+        return self.state == ResearchState.COMPLETED
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.state in (ResearchState.COMPLETED, ResearchState.FAILED)
+
+
+class ResearchResult(BaseModel):
+    """Result from completed research."""
+
+    job_id: str
+    summary: str = Field(description="Research summary")
+    sources: list[str] = Field(default_factory=list)
+    raw_response: str | None = None
+
+
+class ResearchStatus(BaseModel):
+    """Status check response."""
+
+    job: ResearchJob
+    result: ResearchResult | None = None
+    error: str | None = None
+
+
+# --- Research Tool Input Models ---
+
+
+class StartResearchInput(BaseModel):
+    """Input for start_research tool."""
+
+    topic: str = Field(description="Research topic or question")
+    depth: ResearchDepth = Field(
+        default=ResearchDepth.STANDARD,
+        description="How thorough the research should be",
+    )
+
+
+class GetResearchInput(BaseModel):
+    """Input for get_research tool."""
+
+    job_id: str = Field(description="Job ID from start_research")
+
+
+class ListResearchInput(BaseModel):
+    """Input for list_research tool."""
+
+    state: ResearchState | None = Field(
+        default=None,
+        description="Filter by state (optional)",
+    )
+    limit: int = Field(default=10, ge=1, le=100)
+
 
 # --- Tool Input Models ---
 

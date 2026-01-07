@@ -55,3 +55,7 @@ jobs.db
 
 # macOS
 .DS_Store
+
+# Planning docs (not for distribution)
+IMPLEMENTATION_PLAN.md
+DEEP_RESEARCH_PLAN.md
