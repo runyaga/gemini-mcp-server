@@ -71,8 +71,7 @@ Create `~/.config/gemini-mcp-server/config.toml`:
 # Directories where file reading is allowed
 allowed = [
     "~/dev",
-    "~/Documents/projects",
-    "/tmp"
+    "~/Documents/projects"
 ]
 
 # Additional patterns to block (extends defaults)
