@@ -39,6 +39,20 @@ Add to Claude settings (`~/.claude/settings.json` or `claude_desktop_config.json
 | `start_research` | Start async deep research job |
 | `get_research` | Get research job status/result |
 | `list_research` | List research jobs |
+| `generate_image` | Generate images using Nano Banana |
+
+## Image Generation (Nano Banana)
+
+Generate images using Gemini's Nano Banana capability:
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `prompt` | Image description | (required) |
+| `model` | `gemini-2.5-flash-image` (fast) or `gemini-3-pro-image-preview` (quality) | `gemini-2.5-flash-image` |
+| `aspect_ratio` | `1:1`, `16:9`, `9:16`, `4:3`, `3:4` | `1:1` |
+| `output_dir` | Directory to save image | `/tmp` |
+
+Images are saved locally and the file path is returned.
 
 ## Usage
 
