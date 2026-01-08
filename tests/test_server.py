@@ -1,14 +1,31 @@
 """Tests for Gemini MCP Server."""
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+from gemini_mcp_server.config import ReadFileConfig, ServerConfig, reset_config
 
 
 @pytest.fixture
 def mock_env(monkeypatch):
     """Set up test environment."""
     monkeypatch.setenv("GEMINI_API_KEY", "test-api-key")
+
+
+@pytest.fixture
+def mock_config_for_tmp(tmp_path):
+    """Provide a mock config that allows tmp_path for read_file tests."""
+    config = ServerConfig(
+        read_file=ReadFileConfig(
+            enabled=True,
+            allowed_paths=[tmp_path],
+        )
+    )
+    with patch("gemini_mcp_server.get_config", return_value=config):
+        yield config
+    reset_config()
 
 
 class TestPydanticModels:
@@ -840,7 +857,7 @@ class TestReadFileTool:
     """Test read_file tool handler."""
 
     @pytest.mark.asyncio
-    async def test_read_file_success(self, mock_env, tmp_path):
+    async def test_read_file_success(self, mock_env, tmp_path, mock_config_for_tmp):
         """Should read file and return Gemini analysis."""
         # Create a test file
         test_file = tmp_path / "test.py"
@@ -872,20 +889,23 @@ class TestReadFileTool:
             assert "def hello():" in call_args[0][0]
 
     @pytest.mark.asyncio
-    async def test_read_file_not_found(self, mock_env):
+    async def test_read_file_not_found(self, mock_env, tmp_path, mock_config_for_tmp):
         """Should return error for non-existent file."""
         with patch("gemini_mcp_server.GoogleModel"):
             from gemini_mcp_server import call_tool
 
             result = await call_tool(
                 "read_file",
-                {"file_path": "/nonexistent/path/file.txt"},
+                {"file_path": str(tmp_path / "nonexistent.txt")},
             )
 
-            assert "Error: File not found" in result[0].text
+            assert "Error:" in result[0].text
+            assert "not found" in result[0].text.lower()
 
     @pytest.mark.asyncio
-    async def test_read_file_is_directory(self, mock_env, tmp_path):
+    async def test_read_file_is_directory(
+        self, mock_env, tmp_path, mock_config_for_tmp
+    ):
         """Should return error when path is a directory."""
         with patch("gemini_mcp_server.GoogleModel"):
             from gemini_mcp_server import call_tool
@@ -898,7 +918,9 @@ class TestReadFileTool:
             assert "Error: Not a file" in result[0].text
 
     @pytest.mark.asyncio
-    async def test_read_file_with_model_parameter(self, mock_env, tmp_path):
+    async def test_read_file_with_model_parameter(
+        self, mock_env, tmp_path, mock_config_for_tmp
+    ):
         """Should use specified model."""
         test_file = tmp_path / "test.txt"
         test_file.write_text("Hello world")
@@ -930,7 +952,9 @@ class TestReadFileTool:
             mock_create.assert_called_once_with("gemini-2.5-pro")
 
     @pytest.mark.asyncio
-    async def test_read_file_default_prompt(self, mock_env, tmp_path):
+    async def test_read_file_default_prompt(
+        self, mock_env, tmp_path, mock_config_for_tmp
+    ):
         """Should use default prompt when not provided."""
         test_file = tmp_path / "test.txt"
         test_file.write_text("Some content")
@@ -955,6 +979,71 @@ class TestReadFileTool:
 
             call_args = mock_agent.run.call_args
             assert "Analyze this file and summarize" in call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_read_file_blocked_without_config(self, mock_env, tmp_path):
+        """Should block file access when no allowed paths configured."""
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("content")
+
+        # Use empty config (no allowed paths)
+        empty_config = ServerConfig(read_file=ReadFileConfig(allowed_paths=[]))
+        with (
+            patch("gemini_mcp_server.GoogleModel"),
+            patch("gemini_mcp_server.get_config", return_value=empty_config),
+        ):
+            from gemini_mcp_server import call_tool
+
+            result = await call_tool(
+                "read_file",
+                {"file_path": str(test_file)},
+            )
+
+            assert "Error:" in result[0].text
+            assert "not configured" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_read_file_blocked_outside_allowed(self, mock_env, tmp_path):
+        """Should block file access outside allowed directories."""
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("content")
+
+        # Config allows a different directory
+        other_dir = tmp_path / "other"
+        other_dir.mkdir()
+        config = ServerConfig(read_file=ReadFileConfig(allowed_paths=[other_dir]))
+        with (
+            patch("gemini_mcp_server.GoogleModel"),
+            patch("gemini_mcp_server.get_config", return_value=config),
+        ):
+            from gemini_mcp_server import call_tool
+
+            result = await call_tool(
+                "read_file",
+                {"file_path": str(test_file)},
+            )
+
+            assert "Error:" in result[0].text
+            assert "not under allowed directories" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_read_file_blocked_env_file(
+        self, mock_env, tmp_path, mock_config_for_tmp
+    ):
+        """Should block .env files even in allowed directories."""
+        env_file = tmp_path / ".env"
+        env_file.write_text("SECRET=value")
+
+        with patch("gemini_mcp_server.GoogleModel"):
+            from gemini_mcp_server import call_tool
+
+            result = await call_tool(
+                "read_file",
+                {"file_path": str(env_file)},
+            )
+
+            assert "Error:" in result[0].text
+            assert "deny pattern" in result[0].text
 
 
 class TestListToolsIncludesReadFile:
@@ -1019,7 +1108,6 @@ class TestIntegration:
     async def test_real_image_generation(self):
         """Test real image generation with Gemini."""
         import os
-        from pathlib import Path
 
         if not (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")):
             pytest.skip("GEMINI_API_KEY or GOOGLE_API_KEY not set")
@@ -1043,7 +1131,7 @@ class TestIntegration:
 
     @pytest.mark.integration
     @pytest.mark.asyncio
-    async def test_real_read_file(self, tmp_path):
+    async def test_real_read_file(self, tmp_path, mock_config_for_tmp):
         """Test real file reading with Gemini analysis."""
         import os
 

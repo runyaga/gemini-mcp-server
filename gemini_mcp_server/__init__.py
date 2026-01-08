@@ -15,6 +15,7 @@ from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 
 from gemini_mcp_server.client import execute_code, generate_image
+from gemini_mcp_server.config import get_config
 from gemini_mcp_server.deps import GeminiDeps
 from gemini_mcp_server.models import (
     AskGeminiInput,
@@ -298,17 +299,22 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         file_input = ReadFileInput.model_validate(arguments)
         file_path = Path(file_input.file_path)
 
-        # Validate file exists and is readable
-        if not file_path.exists():
-            return [
-                TextContent(type="text", text=f"Error: File not found: {file_path}")
-            ]
-        if not file_path.is_file():
+        # Security: Validate path against allowed directories and deny patterns
+        config = get_config()
+        is_allowed, error_msg = config.read_file.is_path_allowed(file_path)
+        if not is_allowed:
+            return [TextContent(type="text", text=f"Error: {error_msg}")]
+
+        # Resolve to canonical path after validation
+        resolved_path = file_path.expanduser().resolve()
+
+        # Validate is a file (not directory)
+        if not resolved_path.is_file():
             return [TextContent(type="text", text=f"Error: Not a file: {file_path}")]
 
         # Read file contents
         try:
-            content = file_path.read_text(encoding="utf-8")
+            content = resolved_path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             return [
                 TextContent(
@@ -324,7 +330,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         # Build prompt with file contents
         file_prompt = (
             f"{file_input.prompt}\n\n"
-            f"--- File: {file_path.name} ---\n"
+            f"--- File: {resolved_path.name} ---\n"
             f"{content}\n"
             f"--- End of file ---"
         )
@@ -334,7 +340,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         deps = GeminiDeps.from_env()
         result = await agent.run(file_prompt, deps=deps)
 
-        response = f"File: {file_path}\n\n{result.output}"
+        response = f"File: {resolved_path}\n\n{result.output}"
         return [TextContent(type="text", text=response)]
 
     raise ValueError(f"Unknown tool: {name}")
@@ -371,6 +377,7 @@ __all__ = [
     "create_agent",
     "execute_code",
     "generate_image",
+    "get_config",
     "get_research_manager",
     "list_tools",
     "main",
