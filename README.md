@@ -1,5 +1,8 @@
 # Gemini MCP Server
 
+[![CI](https://github.com/runyaga/gemini-mcp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/runyaga/gemini-mcp-server/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/runyaga/gemini-mcp-server/graph/badge.svg)](https://codecov.io/gh/runyaga/gemini-mcp-server)
+
 MCP server for Google Gemini with async deep research capabilities.
 
 ## Setup
