@@ -126,6 +126,39 @@ class RunCodeInput(BaseModel):
     )
 
 
+class ReadFileInput(BaseModel):
+    """Input schema for read_file tool."""
+
+    file_path: str = Field(description="Absolute path to the file to read")
+    prompt: str = Field(
+        default="Analyze this file and summarize its contents.",
+        description="What to do with the file contents (e.g., 'summarize', 'find bugs', 'explain')",
+    )
+    model: str | None = Field(
+        default=None,
+        description="The Gemini model to use (default: gemini-2.0-flash)",
+    )
+
+
+class GenerateImageInput(BaseModel):
+    """Input schema for generate_image tool."""
+
+    prompt: str = Field(description="Description of the image to generate")
+    model: str | None = Field(
+        default=None,
+        description="Model to use: gemini-2.5-flash-image (default, fast) "
+        "or gemini-3-pro-image-preview (higher quality)",
+    )
+    aspect_ratio: str = Field(
+        default="1:1",
+        description="Aspect ratio: 1:1, 16:9, 9:16, 4:3, 3:4",
+    )
+    output_dir: str | None = Field(
+        default=None,
+        description="Directory to save image (default: /tmp)",
+    )
+
+
 # --- Response Models ---
 
 
@@ -155,3 +188,12 @@ class CodeExecutionResult(BaseModel):
         default=None,
         description="The actual code that was executed (may differ from input)",
     )
+
+
+class ImageGenerationResult(BaseModel):
+    """Structured output from image generation."""
+
+    success: bool
+    file_path: str | None = None
+    error: str | None = None
+    model_used: str | None = None

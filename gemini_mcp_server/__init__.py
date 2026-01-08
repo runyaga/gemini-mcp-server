@@ -14,13 +14,16 @@ from pydantic_ai import Agent
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 
-from gemini_mcp_server.client import execute_code
+from gemini_mcp_server.client import execute_code, generate_image
+from gemini_mcp_server.config import get_config
 from gemini_mcp_server.deps import GeminiDeps
 from gemini_mcp_server.models import (
     AskGeminiInput,
+    GenerateImageInput,
     GetResearchInput,
     ListModelsInput,
     ListResearchInput,
+    ReadFileInput,
     RunCodeInput,
     StartResearchInput,
 )
@@ -120,6 +123,19 @@ async def list_tools() -> list[Tool]:
             description="List research jobs, optionally filtered by state. "
             "Returns jobs ordered by creation time (newest first).",
             inputSchema=ListResearchInput.model_json_schema(),
+        ),
+        Tool(
+            name="generate_image",
+            description="Generate an image using Gemini's Nano Banana capability. "
+            "Returns the file path to the generated image.",
+            inputSchema=GenerateImageInput.model_json_schema(),
+        ),
+        Tool(
+            name="read_file",
+            description="Read a local file and have Gemini analyze it. "
+            "Use this to offload file analysis to Gemini, saving context in your conversation. "
+            "Supports code, text, data files, etc.",
+            inputSchema=ReadFileInput.model_json_schema(),
         ),
     ]
 
@@ -245,6 +261,88 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
         return [TextContent(type="text", text="\n".join(response_lines))]
 
+    if name == "generate_image":
+        image_input = GenerateImageInput.model_validate(arguments)
+        image_deps = GeminiDeps.from_env()
+
+        # Determine output path
+        output_path = None
+        if image_input.output_dir:
+            import uuid
+
+            output_path = (
+                f"{image_input.output_dir}/gemini_img_{uuid.uuid4().hex[:8]}.png"
+            )
+
+        result = await generate_image(
+            client=image_deps.client,
+            prompt=image_input.prompt,
+            model=image_input.model or "gemini-2.5-flash-image",
+            aspect_ratio=image_input.aspect_ratio,
+            output_path=output_path,
+        )
+
+        if result.success:
+            response = (
+                f"Image generated successfully.\n\n"
+                f"File: {result.file_path}\n"
+                f"Model: {result.model_used}"
+            )
+        else:
+            response = f"Image generation failed.\n\nError: {result.error}"
+
+        return [TextContent(type="text", text=response)]
+
+    if name == "read_file":
+        from pathlib import Path
+
+        file_input = ReadFileInput.model_validate(arguments)
+        file_path = Path(file_input.file_path)
+
+        # Security: Validate path against allowed directories and deny patterns
+        config = get_config()
+        is_allowed, error_msg = config.read_file.is_path_allowed(file_path)
+        if not is_allowed:
+            return [TextContent(type="text", text=f"Error: {error_msg}")]
+
+        # Resolve to canonical path after validation
+        resolved_path = file_path.expanduser().resolve()
+
+        # Validate is a file (not directory)
+        if not resolved_path.is_file():
+            return [TextContent(type="text", text=f"Error: Not a file: {file_path}")]
+
+        # Read file contents
+        try:
+            content = resolved_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return [
+                TextContent(
+                    type="text",
+                    text=f"Error: Cannot read binary file as text: {file_path}",
+                )
+            ]
+        except PermissionError:
+            return [
+                TextContent(type="text", text=f"Error: Permission denied: {file_path}")
+            ]
+
+        # Build prompt with file contents
+        file_prompt = (
+            f"{file_input.prompt}\n\n"
+            f"--- File: {resolved_path.name} ---\n"
+            f"{content}\n"
+            f"--- End of file ---"
+        )
+
+        # Send to Gemini
+        agent = create_agent(file_input.model)
+        deps = GeminiDeps.from_env()
+        result = await agent.run(file_prompt, deps=deps)
+
+        response = f"File: {resolved_path}\n\n{result.output}"
+        return [TextContent(type="text", text=response)]
+
     raise ValueError(f"Unknown tool: {name}")
 
 
@@ -267,15 +365,19 @@ def main() -> None:
 __all__ = [
     "AskGeminiInput",
     "GeminiDeps",
+    "GenerateImageInput",
     "GetResearchInput",
     "ListModelsInput",
     "ListResearchInput",
+    "ReadFileInput",
     "ResearchManager",
     "RunCodeInput",
     "StartResearchInput",
     "call_tool",
     "create_agent",
     "execute_code",
+    "generate_image",
+    "get_config",
     "get_research_manager",
     "list_tools",
     "main",

@@ -1,14 +1,31 @@
 """Tests for Gemini MCP Server."""
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+from gemini_mcp_server.config import ReadFileConfig, ServerConfig, reset_config
 
 
 @pytest.fixture
 def mock_env(monkeypatch):
     """Set up test environment."""
     monkeypatch.setenv("GEMINI_API_KEY", "test-api-key")
+
+
+@pytest.fixture
+def mock_config_for_tmp(tmp_path):
+    """Provide a mock config that allows tmp_path for read_file tests."""
+    config = ServerConfig(
+        read_file=ReadFileConfig(
+            enabled=True,
+            allowed_paths=[tmp_path],
+        )
+    )
+    with patch("gemini_mcp_server.get_config", return_value=config):
+        yield config
+    reset_config()
 
 
 class TestPydanticModels:
@@ -46,6 +63,49 @@ class TestPydanticModels:
         assert "model" in schema["properties"]
         assert "prompt" in schema["required"]
 
+    def test_generate_image_input_validation(self):
+        """Should validate generate_image input."""
+        from gemini_mcp_server import GenerateImageInput
+
+        # Valid input with defaults
+        inputs = GenerateImageInput(prompt="A cat")
+        assert inputs.prompt == "A cat"
+        assert inputs.model is None
+        assert inputs.aspect_ratio == "1:1"
+        assert inputs.output_dir is None
+
+        # With all parameters
+        inputs = GenerateImageInput(
+            prompt="A dog",
+            model="gemini-3-pro-image-preview",
+            aspect_ratio="16:9",
+            output_dir="/custom/path",
+        )
+        assert inputs.model == "gemini-3-pro-image-preview"
+        assert inputs.aspect_ratio == "16:9"
+        assert inputs.output_dir == "/custom/path"
+
+    def test_generate_image_input_requires_prompt(self):
+        """Should require prompt field."""
+        from pydantic import ValidationError
+
+        from gemini_mcp_server import GenerateImageInput
+
+        with pytest.raises(ValidationError):
+            GenerateImageInput()
+
+    def test_generate_image_schema_generation(self):
+        """Should generate valid JSON schema."""
+        from gemini_mcp_server import GenerateImageInput
+
+        schema = GenerateImageInput.model_json_schema()
+        assert schema["type"] == "object"
+        assert "prompt" in schema["properties"]
+        assert "model" in schema["properties"]
+        assert "aspect_ratio" in schema["properties"]
+        assert "output_dir" in schema["properties"]
+        assert "prompt" in schema["required"]
+
 
 class TestListTools:
     """Test tool listing."""
@@ -58,7 +118,7 @@ class TestListTools:
 
             tools = await list_tools()
 
-            assert len(tools) == 6
+            assert len(tools) == 8
             tool_names = [t.name for t in tools]
             assert "ask_gemini" in tool_names
             assert "list_gemini_models" in tool_names
@@ -66,6 +126,8 @@ class TestListTools:
             assert "start_research" in tool_names
             assert "get_research" in tool_names
             assert "list_research" in tool_names
+            assert "generate_image" in tool_names
+            assert "read_file" in tool_names
 
             ask_gemini = next(t for t in tools if t.name == "ask_gemini")
             assert "prompt" in ask_gemini.inputSchema["properties"]
@@ -78,6 +140,11 @@ class TestListTools:
             start_research = next(t for t in tools if t.name == "start_research")
             assert "topic" in start_research.inputSchema["properties"]
             assert "depth" in start_research.inputSchema["properties"]
+
+            generate_image = next(t for t in tools if t.name == "generate_image")
+            assert "prompt" in generate_image.inputSchema["properties"]
+            assert "model" in generate_image.inputSchema["properties"]
+            assert "aspect_ratio" in generate_image.inputSchema["properties"]
 
 
 class TestCallTool:
@@ -504,6 +571,501 @@ class TestRunCodeTool:
             assert call_kwargs["context"] == "Sum numbers 1-100"
 
 
+class TestGenerateImage:
+    """Test generate_image function."""
+
+    @pytest.mark.asyncio
+    async def test_generate_image_success(self):
+        """Should generate image and save to file."""
+        from gemini_mcp_server.client import generate_image
+        from gemini_mcp_server.models import ImageGenerationResult
+
+        # Mock inline_data with image content
+        mock_inline_data = MagicMock()
+        mock_inline_data.data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+
+        mock_part = MagicMock()
+        mock_part.inline_data = mock_inline_data
+        mock_part.as_image.return_value = MagicMock()
+
+        mock_candidate = MagicMock()
+        mock_candidate.content.parts = [mock_part]
+
+        mock_response = MagicMock()
+        mock_response.candidates = [mock_candidate]
+
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+
+        result = await generate_image(
+            client=mock_client,
+            prompt="A cute cat",
+            model="gemini-2.5-flash-image",
+        )
+
+        assert isinstance(result, ImageGenerationResult)
+        assert result.success is True
+        assert result.file_path is not None
+        assert result.file_path.startswith("/tmp/gemini_img_")
+        assert result.model_used == "gemini-2.5-flash-image"
+
+    @pytest.mark.asyncio
+    async def test_generate_image_no_candidates(self):
+        """Should handle response with no candidates."""
+        from gemini_mcp_server.client import generate_image
+
+        mock_response = MagicMock()
+        mock_response.candidates = []
+
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+
+        result = await generate_image(
+            client=mock_client,
+            prompt="A cat",
+        )
+
+        assert result.success is False
+        assert "No response candidates" in result.error
+
+    @pytest.mark.asyncio
+    async def test_generate_image_no_image_data(self):
+        """Should handle response with no image data."""
+        from gemini_mcp_server.client import generate_image
+
+        mock_part = MagicMock()
+        mock_part.inline_data = None
+        mock_part.text = "I cannot generate that image."
+
+        mock_candidate = MagicMock()
+        mock_candidate.content.parts = [mock_part]
+
+        mock_response = MagicMock()
+        mock_response.candidates = [mock_candidate]
+
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+
+        result = await generate_image(
+            client=mock_client,
+            prompt="An inappropriate image",
+        )
+
+        assert result.success is False
+        assert "No image generated" in result.error
+        assert "I cannot generate that image" in result.error
+
+    @pytest.mark.asyncio
+    async def test_generate_image_api_error(self):
+        """Should handle API errors gracefully."""
+        from gemini_mcp_server.client import generate_image
+
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content = AsyncMock(
+            side_effect=Exception("API connection failed")
+        )
+
+        result = await generate_image(
+            client=mock_client,
+            prompt="A cat",
+        )
+
+        assert result.success is False
+        assert "API connection failed" in result.error
+
+    @pytest.mark.asyncio
+    async def test_generate_image_custom_output_path(self):
+        """Should use custom output path when provided."""
+        from gemini_mcp_server.client import generate_image
+
+        mock_inline_data = MagicMock()
+        mock_inline_data.data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+
+        mock_part = MagicMock()
+        mock_part.inline_data = mock_inline_data
+        mock_part.as_image.return_value = MagicMock()
+
+        mock_candidate = MagicMock()
+        mock_candidate.content.parts = [mock_part]
+
+        mock_response = MagicMock()
+        mock_response.candidates = [mock_candidate]
+
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+
+        result = await generate_image(
+            client=mock_client,
+            prompt="A cat",
+            output_path="/tmp/custom_image.png",
+        )
+
+        assert result.success is True
+        assert result.file_path == "/tmp/custom_image.png"
+
+
+class TestGenerateImageTool:
+    """Test generate_image tool handler."""
+
+    @pytest.mark.asyncio
+    async def test_generate_image_tool_success(self, mock_env):
+        """Should return formatted success response."""
+        from gemini_mcp_server.models import ImageGenerationResult
+
+        mock_result = ImageGenerationResult(
+            success=True,
+            file_path="/tmp/gemini_img_test123.png",
+            model_used="gemini-2.5-flash-image",
+        )
+
+        mock_deps = MagicMock()
+
+        with (
+            patch("gemini_mcp_server.GoogleModel"),
+            patch("gemini_mcp_server.GeminiDeps.from_env", return_value=mock_deps),
+            patch(
+                "gemini_mcp_server.generate_image",
+                new_callable=AsyncMock,
+                return_value=mock_result,
+            ),
+        ):
+            from gemini_mcp_server import call_tool
+
+            result = await call_tool("generate_image", {"prompt": "A beautiful sunset"})
+
+            assert "Image generated successfully" in result[0].text
+            assert "/tmp/gemini_img_test123.png" in result[0].text
+            assert "gemini-2.5-flash-image" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_generate_image_tool_failure(self, mock_env):
+        """Should return formatted error response on failure."""
+        from gemini_mcp_server.models import ImageGenerationResult
+
+        mock_result = ImageGenerationResult(
+            success=False,
+            error="Content policy violation",
+            model_used="gemini-2.5-flash-image",
+        )
+
+        mock_deps = MagicMock()
+
+        with (
+            patch("gemini_mcp_server.GoogleModel"),
+            patch("gemini_mcp_server.GeminiDeps.from_env", return_value=mock_deps),
+            patch(
+                "gemini_mcp_server.generate_image",
+                new_callable=AsyncMock,
+                return_value=mock_result,
+            ),
+        ):
+            from gemini_mcp_server import call_tool
+
+            result = await call_tool(
+                "generate_image", {"prompt": "Something inappropriate"}
+            )
+
+            assert "Image generation failed" in result[0].text
+            assert "Content policy violation" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_generate_image_tool_with_parameters(self, mock_env):
+        """Should pass all parameters to generate_image function."""
+        from gemini_mcp_server.models import ImageGenerationResult
+
+        mock_result = ImageGenerationResult(
+            success=True,
+            file_path="/custom/dir/gemini_img_abc123.png",
+            model_used="gemini-3-pro-image-preview",
+        )
+
+        mock_deps = MagicMock()
+
+        with (
+            patch("gemini_mcp_server.GoogleModel"),
+            patch("gemini_mcp_server.GeminiDeps.from_env", return_value=mock_deps),
+            patch(
+                "gemini_mcp_server.generate_image",
+                new_callable=AsyncMock,
+                return_value=mock_result,
+            ) as mock_generate,
+        ):
+            from gemini_mcp_server import call_tool
+
+            await call_tool(
+                "generate_image",
+                {
+                    "prompt": "A landscape",
+                    "model": "gemini-3-pro-image-preview",
+                    "aspect_ratio": "16:9",
+                    "output_dir": "/custom/dir",
+                },
+            )
+
+            mock_generate.assert_called_once()
+            call_kwargs = mock_generate.call_args.kwargs
+            assert call_kwargs["prompt"] == "A landscape"
+            assert call_kwargs["model"] == "gemini-3-pro-image-preview"
+            assert call_kwargs["aspect_ratio"] == "16:9"
+            assert "/custom/dir/" in call_kwargs["output_path"]
+
+
+class TestReadFileInput:
+    """Test ReadFileInput model."""
+
+    def test_read_file_input_validation(self):
+        """Should validate read_file input."""
+        from gemini_mcp_server.models import ReadFileInput
+
+        # Valid input with defaults
+        inputs = ReadFileInput(file_path="/path/to/file.py")
+        assert inputs.file_path == "/path/to/file.py"
+        assert inputs.prompt == "Analyze this file and summarize its contents."
+        assert inputs.model is None
+
+        # With custom prompt
+        inputs = ReadFileInput(
+            file_path="/path/to/file.py",
+            prompt="Find bugs in this code",
+            model="gemini-2.5-pro",
+        )
+        assert inputs.prompt == "Find bugs in this code"
+        assert inputs.model == "gemini-2.5-pro"
+
+    def test_read_file_input_requires_file_path(self):
+        """Should require file_path field."""
+        from pydantic import ValidationError
+
+        from gemini_mcp_server.models import ReadFileInput
+
+        with pytest.raises(ValidationError):
+            ReadFileInput()
+
+    def test_read_file_schema_generation(self):
+        """Should generate valid JSON schema."""
+        from gemini_mcp_server.models import ReadFileInput
+
+        schema = ReadFileInput.model_json_schema()
+        assert schema["type"] == "object"
+        assert "file_path" in schema["properties"]
+        assert "prompt" in schema["properties"]
+        assert "model" in schema["properties"]
+        assert "file_path" in schema["required"]
+
+
+class TestReadFileTool:
+    """Test read_file tool handler."""
+
+    @pytest.mark.asyncio
+    async def test_read_file_success(self, mock_env, tmp_path, mock_config_for_tmp):
+        """Should read file and return Gemini analysis."""
+        # Create a test file
+        test_file = tmp_path / "test.py"
+        test_file.write_text("def hello():\n    return 'world'")
+
+        mock_result = MagicMock()
+        mock_result.output = "This is a simple function that returns 'world'."
+        mock_agent = MagicMock()
+        mock_agent.run = AsyncMock(return_value=mock_result)
+        mock_deps = MagicMock()
+
+        with (
+            patch("gemini_mcp_server.GoogleModel"),
+            patch("gemini_mcp_server.create_agent", return_value=mock_agent),
+            patch("gemini_mcp_server.GeminiDeps.from_env", return_value=mock_deps),
+        ):
+            from gemini_mcp_server import call_tool
+
+            result = await call_tool(
+                "read_file",
+                {"file_path": str(test_file), "prompt": "Explain this code"},
+            )
+
+            assert "test.py" in result[0].text
+            assert "simple function" in result[0].text
+            mock_agent.run.assert_called_once()
+            # Verify file contents were passed to agent
+            call_args = mock_agent.run.call_args
+            assert "def hello():" in call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_read_file_not_found(self, mock_env, tmp_path, mock_config_for_tmp):
+        """Should return error for non-existent file."""
+        with patch("gemini_mcp_server.GoogleModel"):
+            from gemini_mcp_server import call_tool
+
+            result = await call_tool(
+                "read_file",
+                {"file_path": str(tmp_path / "nonexistent.txt")},
+            )
+
+            assert "Error:" in result[0].text
+            assert "not found" in result[0].text.lower()
+
+    @pytest.mark.asyncio
+    async def test_read_file_is_directory(
+        self, mock_env, tmp_path, mock_config_for_tmp
+    ):
+        """Should return error when path is a directory."""
+        with patch("gemini_mcp_server.GoogleModel"):
+            from gemini_mcp_server import call_tool
+
+            result = await call_tool(
+                "read_file",
+                {"file_path": str(tmp_path)},
+            )
+
+            assert "Error: Not a file" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_read_file_with_model_parameter(
+        self, mock_env, tmp_path, mock_config_for_tmp
+    ):
+        """Should use specified model."""
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("Hello world")
+
+        mock_result = MagicMock()
+        mock_result.output = "A greeting"
+        mock_agent = MagicMock()
+        mock_agent.run = AsyncMock(return_value=mock_result)
+        mock_deps = MagicMock()
+
+        with (
+            patch("gemini_mcp_server.GoogleModel"),
+            patch(
+                "gemini_mcp_server.create_agent", return_value=mock_agent
+            ) as mock_create,
+            patch("gemini_mcp_server.GeminiDeps.from_env", return_value=mock_deps),
+        ):
+            from gemini_mcp_server import call_tool
+
+            await call_tool(
+                "read_file",
+                {
+                    "file_path": str(test_file),
+                    "prompt": "Summarize",
+                    "model": "gemini-2.5-pro",
+                },
+            )
+
+            mock_create.assert_called_once_with("gemini-2.5-pro")
+
+    @pytest.mark.asyncio
+    async def test_read_file_default_prompt(
+        self, mock_env, tmp_path, mock_config_for_tmp
+    ):
+        """Should use default prompt when not provided."""
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("Some content")
+
+        mock_result = MagicMock()
+        mock_result.output = "Analysis result"
+        mock_agent = MagicMock()
+        mock_agent.run = AsyncMock(return_value=mock_result)
+        mock_deps = MagicMock()
+
+        with (
+            patch("gemini_mcp_server.GoogleModel"),
+            patch("gemini_mcp_server.create_agent", return_value=mock_agent),
+            patch("gemini_mcp_server.GeminiDeps.from_env", return_value=mock_deps),
+        ):
+            from gemini_mcp_server import call_tool
+
+            await call_tool(
+                "read_file",
+                {"file_path": str(test_file)},
+            )
+
+            call_args = mock_agent.run.call_args
+            assert "Analyze this file and summarize" in call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_read_file_blocked_without_config(self, mock_env, tmp_path):
+        """Should block file access when no allowed paths configured."""
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("content")
+
+        # Use empty config (no allowed paths)
+        empty_config = ServerConfig(read_file=ReadFileConfig(allowed_paths=[]))
+        with (
+            patch("gemini_mcp_server.GoogleModel"),
+            patch("gemini_mcp_server.get_config", return_value=empty_config),
+        ):
+            from gemini_mcp_server import call_tool
+
+            result = await call_tool(
+                "read_file",
+                {"file_path": str(test_file)},
+            )
+
+            assert "Error:" in result[0].text
+            assert "not configured" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_read_file_blocked_outside_allowed(self, mock_env, tmp_path):
+        """Should block file access outside allowed directories."""
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("content")
+
+        # Config allows a different directory
+        other_dir = tmp_path / "other"
+        other_dir.mkdir()
+        config = ServerConfig(read_file=ReadFileConfig(allowed_paths=[other_dir]))
+        with (
+            patch("gemini_mcp_server.GoogleModel"),
+            patch("gemini_mcp_server.get_config", return_value=config),
+        ):
+            from gemini_mcp_server import call_tool
+
+            result = await call_tool(
+                "read_file",
+                {"file_path": str(test_file)},
+            )
+
+            assert "Error:" in result[0].text
+            assert "not under allowed directories" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_read_file_blocked_env_file(
+        self, mock_env, tmp_path, mock_config_for_tmp
+    ):
+        """Should block .env files even in allowed directories."""
+        env_file = tmp_path / ".env"
+        env_file.write_text("SECRET=value")
+
+        with patch("gemini_mcp_server.GoogleModel"):
+            from gemini_mcp_server import call_tool
+
+            result = await call_tool(
+                "read_file",
+                {"file_path": str(env_file)},
+            )
+
+            assert "Error:" in result[0].text
+            assert "deny pattern" in result[0].text
+
+
+class TestListToolsIncludesReadFile:
+    """Test that read_file is included in list_tools."""
+
+    @pytest.mark.asyncio
+    async def test_list_tools_includes_read_file(self, mock_env):
+        """Should include read_file in tool list."""
+        with patch("gemini_mcp_server.GoogleModel"):
+            from gemini_mcp_server import list_tools
+
+            tools = await list_tools()
+
+            tool_names = [t.name for t in tools]
+            assert "read_file" in tool_names
+
+            read_file = next(t for t in tools if t.name == "read_file")
+            assert "file_path" in read_file.inputSchema["properties"]
+            assert "prompt" in read_file.inputSchema["properties"]
+            assert "model" in read_file.inputSchema["properties"]
+
+
 class TestIntegration:
     """Integration tests (require API key)."""
 
@@ -540,3 +1102,65 @@ class TestIntegration:
         assert result[0].type == "text"
         assert "gemini" in result[0].text.lower()
         assert len(result[0].text) > 0
+
+    @pytest.mark.integration
+    @pytest.mark.asyncio
+    async def test_real_image_generation(self):
+        """Test real image generation with Gemini."""
+        import os
+
+        if not (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")):
+            pytest.skip("GEMINI_API_KEY or GOOGLE_API_KEY not set")
+
+        from gemini_mcp_server import call_tool
+
+        result = await call_tool(
+            "generate_image",
+            {"prompt": "A simple red circle on white background"},
+        )
+
+        assert "Image generated successfully" in result[0].text
+        # Extract file path from response
+        for line in result[0].text.split("\n"):
+            if line.startswith("File:"):
+                file_path = line.split(":", 1)[1].strip()
+                assert Path(file_path).exists()
+                # Clean up
+                Path(file_path).unlink()
+                break
+
+    @pytest.mark.integration
+    @pytest.mark.asyncio
+    async def test_real_read_file(self, tmp_path, mock_config_for_tmp):
+        """Test real file reading with Gemini analysis."""
+        import os
+
+        if not (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")):
+            pytest.skip("GEMINI_API_KEY or GOOGLE_API_KEY not set")
+
+        from gemini_mcp_server import call_tool
+
+        # Create a test Python file
+        test_file = tmp_path / "example.py"
+        test_file.write_text(
+            "def fibonacci(n):\n"
+            "    if n <= 1:\n"
+            "        return n\n"
+            "    return fibonacci(n-1) + fibonacci(n-2)\n"
+        )
+
+        result = await call_tool(
+            "read_file",
+            {
+                "file_path": str(test_file),
+                "prompt": "What does this function do? Reply in one sentence.",
+            },
+        )
+
+        assert result[0].type == "text"
+        assert "example.py" in result[0].text
+        # Gemini should recognize it's a Fibonacci function
+        response_lower = result[0].text.lower()
+        assert any(
+            word in response_lower for word in ["fibonacci", "sequence", "recursive"]
+        )
