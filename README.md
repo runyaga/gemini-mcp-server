@@ -43,7 +43,9 @@ Add to Claude settings (`~/.claude/settings.json` or `claude_desktop_config.json
 | `get_research` | Get research job status/result |
 | `list_research` | List research jobs |
 | `generate_image` | Generate images using Nano Banana |
-| `read_file` | Read and analyze local files (requires configuration) |
+| `read_file` | Read and analyze a local file (requires configuration) |
+| `read_files` | Read and analyze multiple files in batch (max 20 files, 5MB total) |
+| `write_file` | Write content to a local file (requires configuration) |
 
 ## Image Generation (Nano Banana)
 
@@ -58,9 +60,21 @@ Generate images using Gemini's Nano Banana capability:
 
 Images are saved locally and the file path is returned.
 
-## File Analysis (read_file)
+## File Analysis (read_file / read_files)
 
-The `read_file` tool allows Gemini to analyze local files. For security, this tool requires explicit configuration of allowed directories.
+The `read_file` and `read_files` tools allow Gemini to analyze local files. For security, these tools require explicit configuration of allowed directories.
+
+### read_files (Batch Analysis)
+
+Analyze multiple files in a single request:
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `file_paths` | List of absolute file paths (max 20) | (required) |
+| `prompt` | What to do with the files | "Analyze these files..." |
+| `model` | Gemini model to use | `gemini-2.0-flash` |
+
+**Limits:** Maximum 20 files, 5MB total size.
 
 ### Security Configuration
 
@@ -100,6 +114,49 @@ The following patterns are always blocked, even within allowed directories:
 | `allowed` | List of directories where file reading is permitted |
 | `deny` | Additional patterns to block (extends defaults) |
 | `deny_override` | Replace default deny patterns entirely |
+
+## File Writing (write_file)
+
+The `write_file` tool allows writing content to local files. For security, this uses a **separate** configuration from `read_file` (principle of least privilege).
+
+### Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `file_path` | Absolute path to write | (required) |
+| `content` | UTF-8 text content | (required) |
+| `create_directories` | Create parent directories if needed | `false` |
+
+### Configuration
+
+Add to `~/.config/gemini-mcp-server/config.toml`:
+
+```toml
+[write_file]
+# Directories where file writing is allowed (separate from read!)
+writable = [
+    "~/output",
+    "/tmp/gemini-output"
+]
+
+# Optional: Override max file size (default: 1MB)
+# max_size = 2097152
+
+# Additional patterns to block (extends defaults)
+# deny = ["*.log"]
+```
+
+### Configuration Options
+
+| Option | Description |
+|--------|-------------|
+| `enabled` | Enable/disable write_file tool (default: `true`) |
+| `writable` | List of directories where file writing is permitted |
+| `max_size` | Maximum content size in bytes (default: 1MB) |
+| `deny` | Additional patterns to block (extends defaults) |
+| `deny_override` | Replace default deny patterns entirely |
+
+**Note:** The same deny patterns that block reads (`.env`, credentials, etc.) also block writes.
 
 ### Environment Variables
 

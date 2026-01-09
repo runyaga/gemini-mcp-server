@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import tomllib
 except ImportError:
-    import tomli as tomllib  # type: ignore[import-not-found]
+    import tomli as tomllib  # type: ignore[import-not-found,no-redef]
 
 
 # Default deny patterns - always blocked regardless of allowed paths
@@ -42,6 +42,9 @@ DEFAULT_DENY_PATTERNS: list[str] = [
     ".git-credentials",
     ".netrc",
 ]
+
+# Default max write size (1MB)
+MAX_WRITE_SIZE_BYTES = 1024 * 1024
 
 
 def _matches_deny_pattern(resolved_path: Path, pattern: str) -> bool:
@@ -131,10 +134,67 @@ class ReadFileConfig:
 
 
 @dataclass
+class WriteFileConfig:
+    """Configuration for the write_file tool."""
+
+    enabled: bool = True
+    writable_paths: list[Path] = field(default_factory=list)
+    deny_patterns: list[str] = field(
+        default_factory=lambda: DEFAULT_DENY_PATTERNS.copy()
+    )
+    max_size_bytes: int = MAX_WRITE_SIZE_BYTES
+
+    def is_write_allowed(self, file_path: Path) -> tuple[bool, str]:
+        """Check if writing to a path is allowed.
+
+        Args:
+            file_path: The path to validate
+
+        Returns:
+            Tuple of (is_allowed, error_message)
+        """
+        if not self.enabled:
+            return False, "write_file is disabled in configuration"
+
+        if not self.writable_paths:
+            return False, (
+                "write_file not configured. Add [write_file] writable = ['~/output'] "
+                "to ~/.config/gemini-mcp-server/config.toml"
+            )
+
+        # Resolve path (strict=False since file may not exist yet)
+        try:
+            resolved = file_path.expanduser().resolve(strict=False)
+        except (OSError, ValueError) as e:
+            return False, f"Invalid path: {e}"
+
+        # Check deny patterns (secondary defense)
+        for pattern in self.deny_patterns:
+            if _matches_deny_pattern(resolved, pattern):
+                return False, f"Access denied: path matches deny pattern '{pattern}'"
+
+        # Check if path is under any writable root
+        for writable_root in self.writable_paths:
+            try:
+                writable_resolved = writable_root.expanduser().resolve()
+                if resolved.is_relative_to(writable_resolved):
+                    return True, ""
+            except (OSError, ValueError):
+                continue
+
+        writable_str = ", ".join(str(p) for p in self.writable_paths)
+        return (
+            False,
+            f"Access denied: path not under writable directories ({writable_str})",
+        )
+
+
+@dataclass
 class ServerConfig:
     """Server-wide configuration."""
 
     read_file: ReadFileConfig = field(default_factory=ReadFileConfig)
+    write_file: WriteFileConfig = field(default_factory=WriteFileConfig)
 
 
 def find_config_file() -> Path | None:
@@ -212,6 +272,28 @@ def _parse_config(data: dict) -> ServerConfig:
         if "deny_override" in rf_data:
             # Replace default deny patterns entirely
             config.read_file.deny_patterns = list(rf_data["deny_override"])
+
+    if "write_file" in data:
+        wf_data = data["write_file"]
+
+        if "enabled" in wf_data:
+            config.write_file.enabled = bool(wf_data["enabled"])
+
+        if "writable" in wf_data:
+            config.write_file.writable_paths = [
+                Path(p).expanduser() for p in wf_data["writable"]
+            ]
+
+        if "max_size" in wf_data:
+            config.write_file.max_size_bytes = int(wf_data["max_size"])
+
+        if "deny" in wf_data:
+            # Extend default deny patterns with user-specified ones
+            config.write_file.deny_patterns.extend(wf_data["deny"])
+
+        if "deny_override" in wf_data:
+            # Replace default deny patterns entirely
+            config.write_file.deny_patterns = list(wf_data["deny_override"])
 
     return config
 

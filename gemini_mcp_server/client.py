@@ -236,7 +236,9 @@ async def generate_image(
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_modalities=["TEXT", "IMAGE"],
-                aspect_ratio=aspect_ratio,
+                image_config=types.ImageConfig(
+                    aspect_ratio=aspect_ratio,
+                ),
             ),
         )
 
@@ -263,11 +265,16 @@ async def generate_image(
                 # or decode base64 manually
                 try:
                     image = part.as_image()
-                    image.save(output_path)
+                    if image is not None:
+                        image.save(output_path)
+                    else:
+                        raise AttributeError("as_image returned None")
                 except AttributeError:
                     # Fallback: decode base64 manually
                     import base64
 
+                    if part.inline_data.data is None:
+                        continue
                     image_data = base64.b64decode(part.inline_data.data)
                     Path(output_path).write_bytes(image_data)
 
