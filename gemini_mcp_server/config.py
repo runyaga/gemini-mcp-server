@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import tomllib
 except ImportError:
-    import tomli as tomllib  # type: ignore[import-not-found]
+    import tomli as tomllib  # type: ignore[import-not-found,no-redef]
 
 
 # Default deny patterns - always blocked regardless of allowed paths

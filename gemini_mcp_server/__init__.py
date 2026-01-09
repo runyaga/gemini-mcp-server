@@ -294,7 +294,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 f"{image_input.output_dir}/gemini_img_{uuid.uuid4().hex[:8]}.png"
             )
 
-        result = await generate_image(
+        image_result = await generate_image(
             client=image_deps.client,
             prompt=image_input.prompt,
             model=image_input.model or "gemini-2.5-flash-image",
@@ -302,14 +302,14 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             output_path=output_path,
         )
 
-        if result.success:
+        if image_result.success:
             response = (
                 f"Image generated successfully.\n\n"
-                f"File: {result.file_path}\n"
-                f"Model: {result.model_used}"
+                f"File: {image_result.file_path}\n"
+                f"Model: {image_result.model_used}"
             )
         else:
-            response = f"Image generation failed.\n\nError: {result.error}"
+            response = f"Image generation failed.\n\nError: {image_result.error}"
 
         return [TextContent(type="text", text=response)]
 
