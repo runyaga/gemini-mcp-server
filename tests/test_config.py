@@ -6,7 +6,9 @@ from unittest.mock import patch
 
 from gemini_mcp_server.config import (
     DEFAULT_DENY_PATTERNS,
+    MAX_WRITE_SIZE_BYTES,
     ReadFileConfig,
+    WriteFileConfig,
     _parse_config,
     find_config_file,
     load_config,
@@ -215,18 +217,18 @@ class TestConfigLoading:
 
     def test_no_config_returns_none(self):
         """Should return None when no config file exists."""
-        with patch.dict(os.environ, {}, clear=True):
-            # Remove GEMINI_MCP_CONFIG if set
-            os.environ.pop("GEMINI_MCP_CONFIG", None)
-            from gemini_mcp_server import config as config_module
+        import gemini_mcp_server.config as config_module
 
-            original_dirs = config_module.CONFIG_DIRS
-            config_module.CONFIG_DIRS = [Path("/nonexistent/path")]
-            try:
-                found = find_config_file()
-                assert found is None
-            finally:
-                config_module.CONFIG_DIRS = original_dirs
+        # Patch both env var and CONFIG_DIRS to ensure no config is found
+        with (
+            patch.dict(os.environ, {"GEMINI_MCP_CONFIG": ""}, clear=False),
+            patch.object(config_module, "CONFIG_DIRS", [Path("/nonexistent/path")]),
+        ):
+            # Need to re-import to get the patched version
+            from gemini_mcp_server.config import find_config_file as find_config
+
+            found = find_config()
+            assert found is None
 
 
 class TestParseConfig:
@@ -341,3 +343,125 @@ class TestPathTraversalPrevention:
         if home_file.expanduser().exists():
             allowed, _ = config.is_path_allowed(home_file)
             assert not allowed
+
+
+class TestWriteFileConfig:
+    """Test WriteFileConfig path validation for writes."""
+
+    def test_no_writable_paths_returns_error(self):
+        """Should return error when no writable paths configured."""
+        config = WriteFileConfig(writable_paths=[])
+        allowed, msg = config.is_write_allowed(Path("/some/file.txt"))
+        assert not allowed
+        assert "not configured" in msg
+
+    def test_disabled_returns_error(self):
+        """Should return error when write_file is disabled."""
+        config = WriteFileConfig(enabled=False, writable_paths=[Path("/tmp")])
+        allowed, msg = config.is_write_allowed(Path("/tmp/test.txt"))
+        assert not allowed
+        assert "disabled" in msg
+
+    def test_path_under_writable_dir_succeeds(self, tmp_path):
+        """Should allow writing to paths under writable directories."""
+        config = WriteFileConfig(writable_paths=[tmp_path])
+        # Note: file doesn't need to exist for write validation
+        target = tmp_path / "new_file.txt"
+        allowed, msg = config.is_write_allowed(target)
+        assert allowed
+        assert msg == ""
+
+    def test_path_outside_writable_dir_fails(self, tmp_path):
+        """Should block writes outside writable directories."""
+        writable_dir = tmp_path / "writable"
+        writable_dir.mkdir()
+        outside_file = tmp_path / "outside.txt"
+
+        config = WriteFileConfig(writable_paths=[writable_dir])
+        allowed, msg = config.is_write_allowed(outside_file)
+        assert not allowed
+        assert "not under writable directories" in msg
+
+    def test_deny_pattern_blocked(self, tmp_path):
+        """Should block writes matching deny patterns even in writable dirs."""
+        config = WriteFileConfig(writable_paths=[tmp_path])
+        env_file = tmp_path / ".env"
+        allowed, msg = config.is_write_allowed(env_file)
+        assert not allowed
+        assert "deny pattern" in msg
+
+    def test_symlink_escape_blocked(self, tmp_path):
+        """Should block symlink escape attempts."""
+        writable_dir = tmp_path / "writable"
+        writable_dir.mkdir()
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+
+        # Create symlink inside writable pointing outside
+        escape_link = writable_dir / "escape"
+        escape_link.symlink_to(outside_dir)
+
+        config = WriteFileConfig(writable_paths=[writable_dir])
+        # Try to write via the symlink (using neutral filename to avoid deny pattern match)
+        target = escape_link / "data.txt"
+        allowed, msg = config.is_write_allowed(target)
+        assert not allowed
+        assert "not under writable directories" in msg
+
+    def test_nested_path_allowed(self, tmp_path):
+        """Should allow writes to nested directories under writable root."""
+        config = WriteFileConfig(writable_paths=[tmp_path])
+        nested = tmp_path / "deep" / "nested" / "path" / "file.txt"
+        allowed, _ = config.is_write_allowed(nested)
+        assert allowed
+
+    def test_max_size_stored(self):
+        """Should store max size configuration."""
+        config = WriteFileConfig(max_size_bytes=2048)
+        assert config.max_size_bytes == 2048
+
+    def test_default_max_size(self):
+        """Should use default max size."""
+        config = WriteFileConfig()
+        assert config.max_size_bytes == MAX_WRITE_SIZE_BYTES
+
+
+class TestWriteFileConfigParsing:
+    """Test parsing write_file configuration from TOML."""
+
+    def test_parse_writable_paths(self, tmp_path):
+        """Should parse writable paths from config."""
+        data = {"write_file": {"writable": [str(tmp_path), "/tmp/output"]}}
+        config = _parse_config(data)
+        assert len(config.write_file.writable_paths) == 2
+
+    def test_parse_disabled(self):
+        """Should parse enabled=false."""
+        data = {"write_file": {"enabled": False, "writable": ["/tmp"]}}
+        config = _parse_config(data)
+        assert config.write_file.enabled is False
+
+    def test_parse_max_size(self):
+        """Should parse max_size override."""
+        data = {"write_file": {"writable": ["/tmp"], "max_size": 2097152}}
+        config = _parse_config(data)
+        assert config.write_file.max_size_bytes == 2097152
+
+    def test_parse_additional_deny_patterns(self):
+        """Should extend deny patterns with user-specified ones."""
+        data = {"write_file": {"writable": ["/tmp"], "deny": ["*.log", "*.tmp"]}}
+        config = _parse_config(data)
+        assert "*.log" in config.write_file.deny_patterns
+        assert "*.tmp" in config.write_file.deny_patterns
+        # Default patterns should still be present
+        assert ".env" in config.write_file.deny_patterns
+
+    def test_parse_deny_override(self):
+        """Should replace deny patterns with deny_override."""
+        data = {
+            "write_file": {"writable": ["/tmp"], "deny_override": ["only_this_pattern"]}
+        }
+        config = _parse_config(data)
+        assert config.write_file.deny_patterns == ["only_this_pattern"]
+        # Default patterns should NOT be present
+        assert ".env" not in config.write_file.deny_patterns

@@ -24,8 +24,10 @@ from gemini_mcp_server.models import (
     ListModelsInput,
     ListResearchInput,
     ReadFileInput,
+    ReadFilesInput,
     RunCodeInput,
     StartResearchInput,
+    WriteFileInput,
 )
 from gemini_mcp_server.research import ResearchManager
 
@@ -38,6 +40,10 @@ server = Server("gemini-mcp")
 API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 DEFAULT_MODEL = "gemini-2.0-flash"
 RESEARCH_DB_PATH = os.environ.get("GEMINI_RESEARCH_DB", "research.db")
+
+# read_files limits
+MAX_FILES = 20
+MAX_TOTAL_SIZE_BYTES = 5 * 1024 * 1024  # 5MB
 
 # Singleton research manager (lazy initialized)
 _research_manager: ResearchManager | None = None
@@ -136,6 +142,20 @@ async def list_tools() -> list[Tool]:
             "Use this to offload file analysis to Gemini, saving context in your conversation. "
             "Supports code, text, data files, etc.",
             inputSchema=ReadFileInput.model_json_schema(),
+        ),
+        Tool(
+            name="read_files",
+            description="Read multiple local files and have Gemini analyze them together. "
+            "Use this to offload batch file analysis to Gemini. "
+            "Max 20 files, 5MB total size.",
+            inputSchema=ReadFilesInput.model_json_schema(),
+        ),
+        Tool(
+            name="write_file",
+            description="Write content to a local file. "
+            "Use this to save results from analysis or generation. "
+            "Requires writable directories to be configured.",
+            inputSchema=WriteFileInput.model_json_schema(),
         ),
     ]
 
@@ -343,6 +363,149 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         response = f"File: {resolved_path}\n\n{result.output}"
         return [TextContent(type="text", text=response)]
 
+    if name == "read_files":
+        from pathlib import Path
+
+        files_input = ReadFilesInput.model_validate(arguments)
+        config = get_config()
+
+        # Collect file contents and track errors
+        file_contents: list[tuple[Path, str]] = []
+        errors: list[str] = []
+        total_size = 0
+
+        for file_path_str in files_input.file_paths:
+            file_path = Path(file_path_str)
+
+            # Security: Validate path against allowed directories and deny patterns
+            is_allowed, error_msg = config.read_file.is_path_allowed(file_path)
+            if not is_allowed:
+                errors.append(f"{file_path}: {error_msg}")
+                continue
+
+            # Resolve to canonical path after validation
+            resolved_path = file_path.expanduser().resolve()
+
+            # Validate is a file (not directory)
+            if not resolved_path.is_file():
+                errors.append(f"{file_path}: Not a file")
+                continue
+
+            # Read file contents
+            try:
+                content = resolved_path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                errors.append(f"{file_path}: Cannot read binary file as text")
+                continue
+            except PermissionError:
+                errors.append(f"{file_path}: Permission denied")
+                continue
+
+            # Track total size
+            content_size = len(content.encode("utf-8"))
+            if total_size + content_size > MAX_TOTAL_SIZE_BYTES:
+                errors.append(
+                    f"{file_path}: Would exceed {MAX_TOTAL_SIZE_BYTES // (1024 * 1024)}MB total size limit"
+                )
+                continue
+
+            total_size += content_size
+            file_contents.append((resolved_path, content))
+
+        # If all files failed, return error
+        if not file_contents:
+            error_list = "\n".join(f"  - {e}" for e in errors)
+            return [
+                TextContent(
+                    type="text",
+                    text=f"Error: Could not read any files:\n{error_list}",
+                )
+            ]
+
+        # Build combined prompt with labeled files
+        parts = [files_input.prompt, ""]
+        for resolved_path, content in file_contents:
+            parts.append(f'<file name="{resolved_path}">')
+            parts.append(content)
+            parts.append("</file>")
+            parts.append("")
+
+        file_prompt = "\n".join(parts)
+
+        # Send to Gemini
+        agent = create_agent(files_input.model)
+        deps = GeminiDeps.from_env()
+        result = await agent.run(file_prompt, deps=deps)
+
+        # Build response
+        files_read = [str(p) for p, _ in file_contents]
+        response_parts = [
+            f"Files analyzed ({len(file_contents)}):",
+            *[f"  - {f}" for f in files_read],
+        ]
+        if errors:
+            response_parts.append("")
+            response_parts.append(f"Errors ({len(errors)}):")
+            response_parts.extend(f"  - {e}" for e in errors)
+        response_parts.append("")
+        response_parts.append("--- Analysis ---")
+        response_parts.append(result.output)
+
+        return [TextContent(type="text", text="\n".join(response_parts))]
+
+    if name == "write_file":
+        from pathlib import Path
+
+        write_input = WriteFileInput.model_validate(arguments)
+        file_path = Path(write_input.file_path)
+        config = get_config()
+
+        # Check content size limit
+        content_bytes = write_input.content.encode("utf-8")
+        if len(content_bytes) > config.write_file.max_size_bytes:
+            return [
+                TextContent(
+                    type="text",
+                    text=f"Error: Content size ({len(content_bytes)} bytes) exceeds limit ({config.write_file.max_size_bytes} bytes)",
+                )
+            ]
+
+        # Security: Validate path against writable directories and deny patterns
+        is_allowed, error_msg = config.write_file.is_write_allowed(file_path)
+        if not is_allowed:
+            return [TextContent(type="text", text=f"Error: {error_msg}")]
+
+        # Resolve path (strict=False since file may not exist)
+        resolved_path = file_path.expanduser().resolve()
+
+        # Create parent directories if requested
+        if write_input.create_directories:
+            resolved_path.parent.mkdir(parents=True, exist_ok=True)
+        elif not resolved_path.parent.exists():
+            return [
+                TextContent(
+                    type="text",
+                    text=f"Error: Directory does not exist: {resolved_path.parent}",
+                )
+            ]
+
+        # Write file
+        try:
+            resolved_path.write_bytes(content_bytes)
+        except PermissionError:
+            return [
+                TextContent(type="text", text=f"Error: Permission denied: {file_path}")
+            ]
+        except OSError as e:
+            return [TextContent(type="text", text=f"Error: {e}")]
+
+        return [
+            TextContent(
+                type="text",
+                text=f"Successfully wrote {len(content_bytes)} bytes to {resolved_path}",
+            )
+        ]
+
     raise ValueError(f"Unknown tool: {name}")
 
 
@@ -370,9 +533,11 @@ __all__ = [
     "ListModelsInput",
     "ListResearchInput",
     "ReadFileInput",
+    "ReadFilesInput",
     "ResearchManager",
     "RunCodeInput",
     "StartResearchInput",
+    "WriteFileInput",
     "call_tool",
     "create_agent",
     "execute_code",

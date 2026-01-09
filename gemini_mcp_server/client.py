@@ -236,7 +236,9 @@ async def generate_image(
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_modalities=["TEXT", "IMAGE"],
-                aspect_ratio=aspect_ratio,
+                image_config=types.ImageConfig(
+                    aspect_ratio=aspect_ratio,
+                ),
             ),
         )
 

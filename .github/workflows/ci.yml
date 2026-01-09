@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    branches: ["*"]
   pull_request:
     branches: [master]
 
@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
-      - run: uv sync --dev
+      - run: uv sync --extra dev
       - name: Ruff check
         run: uv run ruff check .
       - name: Ruff format check
@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
-      - run: uv sync --dev
+      - run: uv sync --extra dev
       - name: MyPy
         run: uv run mypy gemini_mcp_server
 
@@ -41,7 +41,7 @@ jobs:
       - uses: astral-sh/setup-uv@v4
         with:
           python-version: ${{ matrix.python-version }}
-      - run: uv sync --dev
+      - run: uv sync --extra dev
       - name: Run tests with coverage
         run: uv run pytest --cov --cov-report=xml -m "not integration"
       - name: Upload coverage to Codecov

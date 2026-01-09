@@ -5,7 +5,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gemini_mcp_server.config import ReadFileConfig, ServerConfig, reset_config
+from gemini_mcp_server.config import (
+    ReadFileConfig,
+    ServerConfig,
+    WriteFileConfig,
+    reset_config,
+)
 
 
 @pytest.fixture
@@ -21,6 +26,20 @@ def mock_config_for_tmp(tmp_path):
         read_file=ReadFileConfig(
             enabled=True,
             allowed_paths=[tmp_path],
+        )
+    )
+    with patch("gemini_mcp_server.get_config", return_value=config):
+        yield config
+    reset_config()
+
+
+@pytest.fixture
+def mock_write_config_for_tmp(tmp_path):
+    """Provide a mock config that allows tmp_path for write_file tests."""
+    config = ServerConfig(
+        write_file=WriteFileConfig(
+            enabled=True,
+            writable_paths=[tmp_path],
         )
     )
     with patch("gemini_mcp_server.get_config", return_value=config):
@@ -118,7 +137,7 @@ class TestListTools:
 
             tools = await list_tools()
 
-            assert len(tools) == 8
+            assert len(tools) == 10
             tool_names = [t.name for t in tools]
             assert "ask_gemini" in tool_names
             assert "list_gemini_models" in tool_names
@@ -128,6 +147,8 @@ class TestListTools:
             assert "list_research" in tool_names
             assert "generate_image" in tool_names
             assert "read_file" in tool_names
+            assert "read_files" in tool_names
+            assert "write_file" in tool_names
 
             ask_gemini = next(t for t in tools if t.name == "ask_gemini")
             assert "prompt" in ask_gemini.inputSchema["properties"]
@@ -597,11 +618,16 @@ class TestGenerateImage:
         mock_client = MagicMock()
         mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
 
-        result = await generate_image(
-            client=mock_client,
-            prompt="A cute cat",
-            model="gemini-2.5-flash-image",
-        )
+        # Mock GenerateContentConfig and ImageConfig to avoid validation errors
+        with (
+            patch("gemini_mcp_server.client.types.GenerateContentConfig", MagicMock()),
+            patch("gemini_mcp_server.client.types.ImageConfig", MagicMock()),
+        ):
+            result = await generate_image(
+                client=mock_client,
+                prompt="A cute cat",
+                model="gemini-2.5-flash-image",
+            )
 
         assert isinstance(result, ImageGenerationResult)
         assert result.success is True
@@ -620,10 +646,15 @@ class TestGenerateImage:
         mock_client = MagicMock()
         mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
 
-        result = await generate_image(
-            client=mock_client,
-            prompt="A cat",
-        )
+        # Mock GenerateContentConfig and ImageConfig to avoid validation errors
+        with (
+            patch("gemini_mcp_server.client.types.GenerateContentConfig", MagicMock()),
+            patch("gemini_mcp_server.client.types.ImageConfig", MagicMock()),
+        ):
+            result = await generate_image(
+                client=mock_client,
+                prompt="A cat",
+            )
 
         assert result.success is False
         assert "No response candidates" in result.error
@@ -646,10 +677,15 @@ class TestGenerateImage:
         mock_client = MagicMock()
         mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
 
-        result = await generate_image(
-            client=mock_client,
-            prompt="An inappropriate image",
-        )
+        # Mock GenerateContentConfig and ImageConfig to avoid validation errors
+        with (
+            patch("gemini_mcp_server.client.types.GenerateContentConfig", MagicMock()),
+            patch("gemini_mcp_server.client.types.ImageConfig", MagicMock()),
+        ):
+            result = await generate_image(
+                client=mock_client,
+                prompt="An inappropriate image",
+            )
 
         assert result.success is False
         assert "No image generated" in result.error
@@ -665,10 +701,15 @@ class TestGenerateImage:
             side_effect=Exception("API connection failed")
         )
 
-        result = await generate_image(
-            client=mock_client,
-            prompt="A cat",
-        )
+        # Mock GenerateContentConfig and ImageConfig to avoid validation errors
+        with (
+            patch("gemini_mcp_server.client.types.GenerateContentConfig", MagicMock()),
+            patch("gemini_mcp_server.client.types.ImageConfig", MagicMock()),
+        ):
+            result = await generate_image(
+                client=mock_client,
+                prompt="A cat",
+            )
 
         assert result.success is False
         assert "API connection failed" in result.error
@@ -694,11 +735,16 @@ class TestGenerateImage:
         mock_client = MagicMock()
         mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
 
-        result = await generate_image(
-            client=mock_client,
-            prompt="A cat",
-            output_path="/tmp/custom_image.png",
-        )
+        # Mock GenerateContentConfig and ImageConfig to avoid validation errors
+        with (
+            patch("gemini_mcp_server.client.types.GenerateContentConfig", MagicMock()),
+            patch("gemini_mcp_server.client.types.ImageConfig", MagicMock()),
+        ):
+            result = await generate_image(
+                client=mock_client,
+                prompt="A cat",
+                output_path="/tmp/custom_image.png",
+            )
 
         assert result.success is True
         assert result.file_path == "/tmp/custom_image.png"
@@ -1064,6 +1110,440 @@ class TestListToolsIncludesReadFile:
             assert "file_path" in read_file.inputSchema["properties"]
             assert "prompt" in read_file.inputSchema["properties"]
             assert "model" in read_file.inputSchema["properties"]
+
+
+class TestReadFilesTool:
+    """Test read_files tool handler."""
+
+    @pytest.mark.asyncio
+    async def test_read_files_success(self, mock_env, tmp_path, mock_config_for_tmp):
+        """Should read multiple files and return Gemini analysis."""
+        # Create test files
+        file1 = tmp_path / "file1.py"
+        file1.write_text("def foo():\n    return 1")
+        file2 = tmp_path / "file2.py"
+        file2.write_text("def bar():\n    return 2")
+
+        mock_result = MagicMock()
+        mock_result.output = "Both files contain simple functions."
+        mock_agent = MagicMock()
+        mock_agent.run = AsyncMock(return_value=mock_result)
+        mock_deps = MagicMock()
+
+        with (
+            patch("gemini_mcp_server.GoogleModel"),
+            patch("gemini_mcp_server.create_agent", return_value=mock_agent),
+            patch("gemini_mcp_server.GeminiDeps.from_env", return_value=mock_deps),
+        ):
+            from gemini_mcp_server import call_tool
+
+            result = await call_tool(
+                "read_files",
+                {
+                    "file_paths": [str(file1), str(file2)],
+                    "prompt": "Compare these files",
+                },
+            )
+
+            assert "Files analyzed (2):" in result[0].text
+            assert str(file1) in result[0].text
+            assert str(file2) in result[0].text
+            assert "simple functions" in result[0].text
+            mock_agent.run.assert_called_once()
+            # Verify file contents were passed to agent
+            call_args = mock_agent.run.call_args
+            assert "def foo():" in call_args[0][0]
+            assert "def bar():" in call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_read_files_partial_failure(
+        self, mock_env, tmp_path, mock_config_for_tmp
+    ):
+        """Should read valid files and report errors for invalid ones."""
+        # Create one valid file
+        valid_file = tmp_path / "valid.py"
+        valid_file.write_text("print('hello')")
+
+        mock_result = MagicMock()
+        mock_result.output = "A print statement."
+        mock_agent = MagicMock()
+        mock_agent.run = AsyncMock(return_value=mock_result)
+        mock_deps = MagicMock()
+
+        with (
+            patch("gemini_mcp_server.GoogleModel"),
+            patch("gemini_mcp_server.create_agent", return_value=mock_agent),
+            patch("gemini_mcp_server.GeminiDeps.from_env", return_value=mock_deps),
+        ):
+            from gemini_mcp_server import call_tool
+
+            result = await call_tool(
+                "read_files",
+                {
+                    "file_paths": [str(valid_file), str(tmp_path / "nonexistent.txt")],
+                    "prompt": "Analyze",
+                },
+            )
+
+            assert "Files analyzed (1):" in result[0].text
+            assert "Errors (1):" in result[0].text
+            assert "nonexistent.txt" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_read_files_all_blocked(self, mock_env, tmp_path):
+        """Should return error when all files are blocked."""
+        # Config allows a different directory
+        other_dir = tmp_path / "other"
+        other_dir.mkdir()
+        config = ServerConfig(read_file=ReadFileConfig(allowed_paths=[other_dir]))
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("content")
+
+        with (
+            patch("gemini_mcp_server.GoogleModel"),
+            patch("gemini_mcp_server.get_config", return_value=config),
+        ):
+            from gemini_mcp_server import call_tool
+
+            result = await call_tool(
+                "read_files",
+                {"file_paths": [str(test_file)]},
+            )
+
+            assert "Error: Could not read any files" in result[0].text
+            assert "not under allowed directories" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_read_files_single_file(
+        self, mock_env, tmp_path, mock_config_for_tmp
+    ):
+        """Should work with a single file."""
+        test_file = tmp_path / "single.txt"
+        test_file.write_text("single file content")
+
+        mock_result = MagicMock()
+        mock_result.output = "Contains single file content."
+        mock_agent = MagicMock()
+        mock_agent.run = AsyncMock(return_value=mock_result)
+        mock_deps = MagicMock()
+
+        with (
+            patch("gemini_mcp_server.GoogleModel"),
+            patch("gemini_mcp_server.create_agent", return_value=mock_agent),
+            patch("gemini_mcp_server.GeminiDeps.from_env", return_value=mock_deps),
+        ):
+            from gemini_mcp_server import call_tool
+
+            result = await call_tool(
+                "read_files",
+                {"file_paths": [str(test_file)]},
+            )
+
+            assert "Files analyzed (1):" in result[0].text
+            assert "single file content" in result[0].text.lower()
+
+    @pytest.mark.asyncio
+    async def test_read_files_security_validation(
+        self, mock_env, tmp_path, mock_config_for_tmp
+    ):
+        """Should enforce deny patterns for all files."""
+        # Create allowed file and blocked .env file
+        allowed_file = tmp_path / "allowed.py"
+        allowed_file.write_text("print('allowed')")
+        env_file = tmp_path / ".env"
+        env_file.write_text("SECRET=value")
+
+        mock_result = MagicMock()
+        mock_result.output = "One allowed file."
+        mock_agent = MagicMock()
+        mock_agent.run = AsyncMock(return_value=mock_result)
+        mock_deps = MagicMock()
+
+        with (
+            patch("gemini_mcp_server.GoogleModel"),
+            patch("gemini_mcp_server.create_agent", return_value=mock_agent),
+            patch("gemini_mcp_server.GeminiDeps.from_env", return_value=mock_deps),
+        ):
+            from gemini_mcp_server import call_tool
+
+            result = await call_tool(
+                "read_files",
+                {"file_paths": [str(allowed_file), str(env_file)]},
+            )
+
+            assert "Files analyzed (1):" in result[0].text
+            assert "Errors (1):" in result[0].text
+            assert "deny pattern" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_read_files_exceeds_size_limit(
+        self, mock_env, tmp_path, mock_config_for_tmp
+    ):
+        """Should reject files that exceed total size limit."""
+        import gemini_mcp_server
+
+        # Save original value
+        original_max = gemini_mcp_server.MAX_TOTAL_SIZE_BYTES
+
+        # Set a small limit for testing
+        gemini_mcp_server.MAX_TOTAL_SIZE_BYTES = 100
+
+        try:
+            file1 = tmp_path / "big1.txt"
+            file1.write_text("x" * 60)
+            file2 = tmp_path / "big2.txt"
+            file2.write_text("y" * 60)
+
+            mock_result = MagicMock()
+            mock_result.output = "First file only."
+            mock_agent = MagicMock()
+            mock_agent.run = AsyncMock(return_value=mock_result)
+            mock_deps = MagicMock()
+
+            with (
+                patch("gemini_mcp_server.GoogleModel"),
+                patch("gemini_mcp_server.create_agent", return_value=mock_agent),
+                patch("gemini_mcp_server.GeminiDeps.from_env", return_value=mock_deps),
+            ):
+                from gemini_mcp_server import call_tool
+
+                result = await call_tool(
+                    "read_files",
+                    {"file_paths": [str(file1), str(file2)]},
+                )
+
+                assert "Files analyzed (1):" in result[0].text
+                assert "Errors (1):" in result[0].text
+                assert "size limit" in result[0].text
+        finally:
+            gemini_mcp_server.MAX_TOTAL_SIZE_BYTES = original_max
+
+    @pytest.mark.asyncio
+    async def test_read_files_with_model_parameter(
+        self, mock_env, tmp_path, mock_config_for_tmp
+    ):
+        """Should use specified model."""
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("content")
+
+        mock_result = MagicMock()
+        mock_result.output = "Analysis"
+        mock_agent = MagicMock()
+        mock_agent.run = AsyncMock(return_value=mock_result)
+        mock_deps = MagicMock()
+
+        with (
+            patch("gemini_mcp_server.GoogleModel"),
+            patch(
+                "gemini_mcp_server.create_agent", return_value=mock_agent
+            ) as mock_create,
+            patch("gemini_mcp_server.GeminiDeps.from_env", return_value=mock_deps),
+        ):
+            from gemini_mcp_server import call_tool
+
+            await call_tool(
+                "read_files",
+                {
+                    "file_paths": [str(test_file)],
+                    "prompt": "Summarize",
+                    "model": "gemini-2.5-pro",
+                },
+            )
+
+            mock_create.assert_called_once_with("gemini-2.5-pro")
+
+    @pytest.mark.asyncio
+    async def test_list_tools_includes_read_files(self, mock_env):
+        """Should include read_files in tool list."""
+        with patch("gemini_mcp_server.GoogleModel"):
+            from gemini_mcp_server import list_tools
+
+            tools = await list_tools()
+
+            tool_names = [t.name for t in tools]
+            assert "read_files" in tool_names
+
+            read_files = next(t for t in tools if t.name == "read_files")
+            schema = read_files.inputSchema
+            assert "file_paths" in schema["properties"]
+            assert schema["properties"]["file_paths"]["type"] == "array"
+            assert "prompt" in schema["properties"]
+            assert "model" in schema["properties"]
+
+
+class TestWriteFileTool:
+    """Test write_file tool handler."""
+
+    @pytest.mark.asyncio
+    async def test_write_file_success(
+        self, mock_env, tmp_path, mock_write_config_for_tmp
+    ):
+        """Should write file to allowed directory."""
+        with patch("gemini_mcp_server.GoogleModel"):
+            from gemini_mcp_server import call_tool
+
+            target_file = tmp_path / "output.txt"
+            result = await call_tool(
+                "write_file",
+                {"file_path": str(target_file), "content": "Hello, World!"},
+            )
+
+            assert "Successfully wrote" in result[0].text
+            assert "13 bytes" in result[0].text
+            assert target_file.exists()
+            assert target_file.read_text() == "Hello, World!"
+
+    @pytest.mark.asyncio
+    async def test_write_file_blocked_outside_writable(self, mock_env, tmp_path):
+        """Should block writes outside writable directories."""
+        # Config allows a different directory
+        writable_dir = tmp_path / "writable"
+        writable_dir.mkdir()
+        config = ServerConfig(write_file=WriteFileConfig(writable_paths=[writable_dir]))
+
+        outside_file = tmp_path / "outside.txt"
+
+        with (
+            patch("gemini_mcp_server.GoogleModel"),
+            patch("gemini_mcp_server.get_config", return_value=config),
+        ):
+            from gemini_mcp_server import call_tool
+
+            result = await call_tool(
+                "write_file",
+                {"file_path": str(outside_file), "content": "test"},
+            )
+
+            assert "Error:" in result[0].text
+            assert "not under writable directories" in result[0].text
+            assert not outside_file.exists()
+
+    @pytest.mark.asyncio
+    async def test_write_file_blocked_env_file(
+        self, mock_env, tmp_path, mock_write_config_for_tmp
+    ):
+        """Should block .env files even in writable directories."""
+        with patch("gemini_mcp_server.GoogleModel"):
+            from gemini_mcp_server import call_tool
+
+            env_file = tmp_path / ".env"
+            result = await call_tool(
+                "write_file",
+                {"file_path": str(env_file), "content": "SECRET=value"},
+            )
+
+            assert "Error:" in result[0].text
+            assert "deny pattern" in result[0].text
+            assert not env_file.exists()
+
+    @pytest.mark.asyncio
+    async def test_write_file_create_directories(
+        self, mock_env, tmp_path, mock_write_config_for_tmp
+    ):
+        """Should create parent directories when flag is set."""
+        with patch("gemini_mcp_server.GoogleModel"):
+            from gemini_mcp_server import call_tool
+
+            nested_file = tmp_path / "deep" / "nested" / "file.txt"
+            result = await call_tool(
+                "write_file",
+                {
+                    "file_path": str(nested_file),
+                    "content": "nested content",
+                    "create_directories": True,
+                },
+            )
+
+            assert "Successfully wrote" in result[0].text
+            assert nested_file.exists()
+            assert nested_file.read_text() == "nested content"
+
+    @pytest.mark.asyncio
+    async def test_write_file_no_create_directories(
+        self, mock_env, tmp_path, mock_write_config_for_tmp
+    ):
+        """Should fail if parent doesn't exist and create_directories is false."""
+        with patch("gemini_mcp_server.GoogleModel"):
+            from gemini_mcp_server import call_tool
+
+            nested_file = tmp_path / "nonexistent" / "file.txt"
+            result = await call_tool(
+                "write_file",
+                {
+                    "file_path": str(nested_file),
+                    "content": "content",
+                    "create_directories": False,
+                },
+            )
+
+            assert "Error:" in result[0].text
+            assert "Directory does not exist" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_write_file_overwrites_existing(
+        self, mock_env, tmp_path, mock_write_config_for_tmp
+    ):
+        """Should overwrite existing file."""
+        with patch("gemini_mcp_server.GoogleModel"):
+            from gemini_mcp_server import call_tool
+
+            target_file = tmp_path / "existing.txt"
+            target_file.write_text("old content")
+
+            result = await call_tool(
+                "write_file",
+                {"file_path": str(target_file), "content": "new content"},
+            )
+
+            assert "Successfully wrote" in result[0].text
+            assert target_file.read_text() == "new content"
+
+    @pytest.mark.asyncio
+    async def test_write_file_exceeds_size_limit(
+        self, mock_env, tmp_path, mock_write_config_for_tmp
+    ):
+        """Should reject content that exceeds size limit."""
+        # Set a small limit for testing
+        config = ServerConfig(
+            write_file=WriteFileConfig(
+                writable_paths=[tmp_path],
+                max_size_bytes=100,
+            )
+        )
+
+        with (
+            patch("gemini_mcp_server.GoogleModel"),
+            patch("gemini_mcp_server.get_config", return_value=config),
+        ):
+            from gemini_mcp_server import call_tool
+
+            target_file = tmp_path / "big.txt"
+            result = await call_tool(
+                "write_file",
+                {"file_path": str(target_file), "content": "x" * 200},
+            )
+
+            assert "Error:" in result[0].text
+            assert "exceeds limit" in result[0].text
+            assert not target_file.exists()
+
+    @pytest.mark.asyncio
+    async def test_list_tools_includes_write_file(self, mock_env):
+        """Should include write_file in tool list."""
+        with patch("gemini_mcp_server.GoogleModel"):
+            from gemini_mcp_server import list_tools
+
+            tools = await list_tools()
+
+            tool_names = [t.name for t in tools]
+            assert "write_file" in tool_names
+
+            write_file = next(t for t in tools if t.name == "write_file")
+            schema = write_file.inputSchema
+            assert "file_path" in schema["properties"]
+            assert "content" in schema["properties"]
+            assert "create_directories" in schema["properties"]
 
 
 class TestIntegration:

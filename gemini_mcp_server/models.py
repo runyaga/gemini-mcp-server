@@ -140,6 +140,37 @@ class ReadFileInput(BaseModel):
     )
 
 
+class ReadFilesInput(BaseModel):
+    """Input schema for read_files tool."""
+
+    file_paths: list[str] = Field(
+        description="List of absolute paths to files to read",
+        min_length=1,
+        max_length=20,
+    )
+    prompt: str = Field(
+        default="Analyze these files and summarize their contents.",
+        description="What to do with the file contents (e.g., 'compare', 'find bugs', 'explain relationships')",
+    )
+    model: str | None = Field(
+        default=None,
+        description="The Gemini model to use (default: gemini-2.0-flash)",
+    )
+
+
+class WriteFileInput(BaseModel):
+    """Input schema for write_file tool."""
+
+    file_path: str = Field(
+        description="Absolute path to the file to write. Must be within allowed writable directories."
+    )
+    content: str = Field(description="UTF-8 text content to write. Max 1MB.")
+    create_directories: bool = Field(
+        default=False,
+        description="Create parent directories if they don't exist",
+    )
+
+
 class GenerateImageInput(BaseModel):
     """Input schema for generate_image tool."""
 
